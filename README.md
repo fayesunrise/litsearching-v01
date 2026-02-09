@@ -4,8 +4,6 @@
 
 An academic research tool built with Streamlit. This assistant leverages the **Semantic Scholar Graph API** for discovery and **Google Gemini 2.0 Flash** for RAG-based (Retrieval-Augmented Generation) synthesis and analysis.
 
-[![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://your-app-link.streamlit.app/)
-
 ## Key Features
 
 * **AI Research Insights**: 
