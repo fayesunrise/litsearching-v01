@@ -3,23 +3,19 @@ import json
 import re
 from typing import Dict, Any, List, Optional, Tuple
 
-import pandas as pd  # Added for data processing
+import pandas as pd  
 import requests
 import streamlit as st
 
-# =============================
-# Page Configuration & Styling
-# =============================
+##page configuration
 st.set_page_config(page_title="Literature searching assistant", layout="wide")
 
 st.markdown("""
     <style>
-    /* 1. Global Background */
     .stApp {
         background-color: #fcfcfc;
     }
 
-    /* 2. Centered Titles */
     .main-title {
         text-align: center;
         color: #1E3A8A; 
@@ -34,7 +30,6 @@ st.markdown("""
         font-size: 1.1rem;
     }
 
-    /* 3. Button Styling & Color Fix */
     button[kind="primary"], div.stButton > button[data-testid="stFormSubmitButton"] {
         background-color: #1E3A8A !important;
         color: white !important;
@@ -49,12 +44,10 @@ st.markdown("""
         box-shadow: 0 4px 12px rgba(0,0,0,0.15) !important;
     }
 
-    /* Standard Buttons */
     div.stButton > button {
         border-radius: 8px;
     }
 
-    /* 4. Paper Card Container */
     div[data-testid="stVerticalBlock"] > div.element-container div.stMarkdown div.stContainer {
         background-color: white;
         padding: 24px;
@@ -64,7 +57,6 @@ st.markdown("""
         margin-bottom: 20px;
     }
 
-    /* 5. Sidebar Styling */
     section[data-testid="stSidebar"] {
         background-color: #f8fafc;
         border-right: 1px solid #e2e8f0;
@@ -96,9 +88,6 @@ with st.sidebar:
     else:
         st.warning("S2 API: Using Rate-Limited Public Access")
 
-# =============================
-# Helpers
-# =============================
 def md5_key(s: str) -> str:
     return hashlib.md5(s.encode("utf-8")).hexdigest()[:12]
 
@@ -115,9 +104,9 @@ def paper_key(p: Dict[str, Any]) -> str:
 def clean_ws(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "")).strip()
 
-# =============================
-# Semantic Scholar API
-# =============================
+
+##S2 API
+
 S2_BASE = "https://api.semanticscholar.org/graph/v1"
 S2_FIELDS = "paperId,title,abstract,year,venue,authors,citationCount,url,openAccessPdf,externalIds"
 
@@ -131,9 +120,9 @@ def s2_search_papers(query: str, api_key: str, limit: int = 10, offset: int = 0)
         raise RuntimeError(f"S2 error {r.status_code}: {r.text[:400]}")
     return r.json()
 
-# =============================
-# Gemini API
-# =============================
+
+## Gemini API
+
 GEMINI_ENDPOINT_TMPL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
 DEFAULT_GEMINI_MODEL = "gemini-2.0-flash"
 
@@ -164,9 +153,9 @@ def try_parse_json(text: str) -> Optional[Dict[str, Any]]:
         except: pass
     return None
 
-# =============================
-# Analytics & Plotting
-# =============================
+
+## Publication analytic plot
+
 def render_visualizations(papers: List[Dict[str, Any]]):
     if not papers: return
     df = pd.DataFrame(papers)
@@ -183,9 +172,8 @@ def render_visualizations(papers: List[Dict[str, Any]]):
             venue_counts = df['venue'].replace('', 'Unknown').value_counts().head(5)
             st.dataframe(venue_counts, use_container_width=True)
 
-# =============================
-# Context construction (RAG)
-# =============================
+
+## Context for synthesis
 def build_papers_context(papers, max_papers=None, include_abstract=True, abstract_char_limit=650):
     """
     If max_papers is None, uses all papers in the list.
@@ -215,16 +203,13 @@ PAPERS:
 {context}
 """.strip()
 
-# =============================
-# Session State initialization
-# =============================
+## session initialization
 for key in ["saved", "saved_ids", "last_query", "last_results", "chat_messages", "chat_context_signature"]:
     if key not in st.session_state:
         st.session_state[key] = [] if any(x in key for x in ["messages", "saved", "results"]) else set() if "ids" in key else ""
 
-# =============================
-# SEARCH UI
-# =============================
+
+## searching
 st.subheader("Search")
 with st.form("search_form", clear_on_submit=False):
     col1, col2, col3 = st.columns([6, 1.4, 1.4])
@@ -243,21 +228,18 @@ if submitted:
                 st.session_state.last_results = results.get("data", [])
             except Exception as e: st.error(f"Error: {e}")
 
-# =============================
-# ANALYTICS SECTION
-# =============================
+
+#ai analysis
 if st.session_state.last_results:
     with st.expander("View Research Trends", expanded=True):
         render_visualizations(st.session_state.last_results)
 
-# =============================
-# AI SYNTHESIS (SYNCED TO RESULT COUNT)
-# =============================
+
 st.subheader("AI Insights")
 ai_cols = st.columns([3, 3, 4])
 target = ai_cols[0].selectbox("Source set", ["Current page results", "Saved papers"])
 model_ai = ai_cols[1].text_input("Gemini model", value=DEFAULT_GEMINI_MODEL)
-# Context size dropdown removed: now automatically synced to the Search "Results" count
+
 
 run_ai = st.button("Generate Synthesis!", type="primary", disabled=not bool(GEMINI_KEY))
 
@@ -265,7 +247,6 @@ if run_ai:
     papers = st.session_state.last_results if target == "Current page results" else st.session_state.saved
     if not papers: st.warning("No papers to summarize.")
     else:
-        # max_papers is now set to None, effectively using the full length of st.session_state.last_results
         ctx, _ = build_papers_context(papers, max_papers=None)
         prompt = make_synthesis_prompt(st.session_state.last_query, ctx)
         
@@ -284,9 +265,9 @@ if run_ai:
                     st.write("**Refined Queries:**")
                     for q in parsed.get("refined_queries", []): st.write(f"- {q}")
 
-# =============================
-# RESULTS LIST
-# =============================
+
+## result analysis
+
 st.divider()
 if st.session_state.last_results:
     for p in st.session_state.last_results:
@@ -300,9 +281,8 @@ if st.session_state.last_results:
             if p.get("openAccessPdf"): c3.link_button("PDF", p["openAccessPdf"]["url"])
             with st.expander("Show Abstract"): st.write(p.get("abstract") or "No abstract available.")
 
-# =============================
-# CHAT INTERFACE
-# =============================
+
+## chat with gemini
 st.divider()
 st.subheader("Chat with Results?")
 if st.session_state.last_results or st.session_state.saved:
@@ -313,8 +293,6 @@ if st.session_state.last_results or st.session_state.saved:
     if user_input:
         st.session_state.chat_messages.append({"role": "user", "text": user_input})
         with st.chat_message("user"): st.write(user_input)
-        
-        # Also sync chat context to the full visible list
         papers_chat = st.session_state.last_results if target == "Current page results" else st.session_state.saved
         ctx_chat, _ = build_papers_context(papers_chat, max_papers=None)
         
