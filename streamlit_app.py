@@ -12,7 +12,7 @@ import streamlit as st
 # =============================
 st.set_page_config(page_title="Literature searching assistant", layout="wide")
 st.title("Literature searching assistant")
-st.write("Meet the paper you want today.")
+st.write("Start from a single word.")
 
 
 # =============================
