@@ -3,39 +3,98 @@ import json
 import re
 from typing import Dict, Any, List, Optional, Tuple
 
+import pandas as pd  # Added for data processing
 import requests
 import streamlit as st
 
-
 # =============================
-# Page
+# Page Configuration & Styling
 # =============================
 st.set_page_config(page_title="Literature searching assistant", layout="wide")
-st.title("Literature searching assistant")
-st.write("Start from a single word.")
 
+st.markdown("""
+    <style>
+    /* 1. Global Background */
+    .stApp {
+        background-color: #fcfcfc;
+    }
 
-# =============================
-# Secrets (safe handling)
-# =============================
+    /* 2. Centered Titles */
+    .main-title {
+        text-align: center;
+        color: #1E3A8A; 
+        font-weight: 800;
+        padding-top: 10px;
+        padding-bottom: 5px;
+    }
+    .sub-title {
+        text-align: center;
+        color: #64748B;
+        margin-bottom: 30px;
+        font-size: 1.1rem;
+    }
+
+    /* 3. Button Styling & Color Fix */
+    button[kind="primary"], div.stButton > button[data-testid="stFormSubmitButton"] {
+        background-color: #1E3A8A !important;
+        color: white !important;
+        border-radius: 8px !important;
+        border: none !important;
+        padding: 0.5rem 1rem !important;
+        transition: all 0.3s ease !important;
+    }
+    
+    button[kind="primary"]:hover, div.stButton > button[data-testid="stFormSubmitButton"]:hover {
+        background-color: #2563EB !important;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.15) !important;
+    }
+
+    /* Standard Buttons */
+    div.stButton > button {
+        border-radius: 8px;
+    }
+
+    /* 4. Paper Card Container */
+    div[data-testid="stVerticalBlock"] > div.element-container div.stMarkdown div.stContainer {
+        background-color: white;
+        padding: 24px;
+        border-radius: 12px;
+        box-shadow: 0 2px 10px rgba(0,0,0,0.05);
+        border: 1px solid #f0f0f0;
+        margin-bottom: 20px;
+    }
+
+    /* 5. Sidebar Styling */
+    section[data-testid="stSidebar"] {
+        background-color: #f8fafc;
+        border-right: 1px solid #e2e8f0;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+st.markdown('<h1 class="main-title">Literature Searching Assistant</h1>', unsafe_allow_html=True)
+st.markdown('<p class="sub-title">Powered by Semantic Scholar and Gemini AI</p>', unsafe_allow_html=True)
+
 def get_secret(name: str) -> str:
     try:
         return st.secrets.get(name, "")
     except Exception:
         return ""
 
-
-S2_KEY = get_secret("SEMANTIC_SCHOLAR_API_KEY")  # optional (S2 works without key but rate-limited)
-GEMINI_KEY = get_secret("GEMINI_API_KEY")        # required for AI functions
-
+S2_KEY = get_secret("SEMANTIC_SCHOLAR_API_KEY")
+GEMINI_KEY = get_secret("GEMINI_API_KEY")
 
 with st.sidebar:
     st.header("Settings")
-    st.caption("Keys are read from `.streamlit/secrets.toml` (local) or Streamlit Cloud Secrets (deploy).")
-    st.write("Semantic Scholar key set:", bool(S2_KEY))
-    st.write("Gemini key set:", bool(GEMINI_KEY))
-    st.caption("Tip: Do NOT commit `.streamlit/secrets.toml` to GitHub.")
-
+    st.caption("Configuration from `.streamlit/secrets.toml`")
+    if bool(GEMINI_KEY):
+        st.success("Gemini API: Connected")
+    else:
+        st.error("Gemini API: Missing")
+    if bool(S2_KEY):
+        st.success("Semantic Scholar API: Connected")
+    else:
+        st.warning("S2 API: Using Rate-Limited Public Access")
 
 # =============================
 # Helpers
@@ -43,22 +102,18 @@ with st.sidebar:
 def md5_key(s: str) -> str:
     return hashlib.md5(s.encode("utf-8")).hexdigest()[:12]
 
-
 def format_authors(authors: List[Dict[str, Any]], max_n: int = 6) -> str:
     names = [a.get("name", "") for a in (authors or []) if a.get("name")]
     if len(names) > max_n:
         return ", ".join(names[:max_n]) + ", et al."
     return ", ".join(names) if names else "Unknown authors"
 
-
 def paper_key(p: Dict[str, Any]) -> str:
     ext = p.get("externalIds") or {}
     return p.get("paperId") or ext.get("DOI") or p.get("title", "paper")
 
-
 def clean_ws(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "")).strip()
-
 
 # =============================
 # Semantic Scholar API
@@ -66,491 +121,208 @@ def clean_ws(s: str) -> str:
 S2_BASE = "https://api.semanticscholar.org/graph/v1"
 S2_FIELDS = "paperId,title,abstract,year,venue,authors,citationCount,url,openAccessPdf,externalIds"
 
-
 @st.cache_data(ttl=3600, show_spinner=False)
 def s2_search_papers(query: str, api_key: str, limit: int = 10, offset: int = 0) -> Dict[str, Any]:
     url = f"{S2_BASE}/paper/search"
     params = {"query": query, "limit": limit, "offset": offset, "fields": S2_FIELDS}
     headers = {"x-api-key": api_key} if api_key else {}
-
     r = requests.get(url, params=params, headers=headers, timeout=30)
     if r.status_code != 200:
         raise RuntimeError(f"S2 error {r.status_code}: {r.text[:400]}")
     return r.json()
 
-
 # =============================
-# Gemini API (generateContent)
+# Gemini API
 # =============================
 GEMINI_ENDPOINT_TMPL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
 DEFAULT_GEMINI_MODEL = "gemini-2.0-flash"
 
-
 def _extract_gemini_text(resp_json: Dict[str, Any]) -> str:
     try:
         parts = resp_json["candidates"][0]["content"]["parts"]
-        texts = []
-        for part in parts:
-            if isinstance(part, dict) and "text" in part:
-                texts.append(part["text"])
-        return "\n".join(texts).strip()
+        return "\n".join([p["text"] for p in parts if "text" in p]).strip()
     except Exception:
         return json.dumps(resp_json)[:1500]
 
-
-def gemini_generate_text(
-    contents: List[Dict[str, Any]],
-    api_key: str,
-    model: str,
-    system_instruction: Optional[str] = None,
-    temperature: float = 0.4,
-    max_output_tokens: int = 900,
-) -> Dict[str, Any]:
-    """
-    contents: list like [{"role":"user","parts":[{"text":"..."}]}, {"role":"model","parts":[{"text":"..."}]}, ...]
-    Returns dict with ok/raw_text/error
-    """
-    if not api_key:
-        return {"ok": False, "raw_text": "", "error": "Missing GEMINI_API_KEY"}
-
+def gemini_generate_text(contents, api_key, model, system_instruction=None, temperature=0.4, max_output_tokens=1500):
+    if not api_key: return {"ok": False, "raw_text": "", "error": "Missing GEMINI_API_KEY"}
     url = GEMINI_ENDPOINT_TMPL.format(model=model, key=api_key)
-
-    payload: Dict[str, Any] = {
-        "contents": contents,
-        "generationConfig": {
-            "temperature": temperature,
-            "maxOutputTokens": max_output_tokens,
-        },
-    }
-    if system_instruction:
-        payload["systemInstruction"] = {"parts": [{"text": system_instruction}]}
-
-    r = requests.post(url, headers={"Content-Type": "application/json"}, json=payload, timeout=60)
-    if r.status_code != 200:
-        return {"ok": False, "raw_text": r.text[:900], "error": f"Gemini HTTP {r.status_code}"}
-
-    data = r.json()
-    text = _extract_gemini_text(data)
-    return {"ok": True, "raw_text": text, "error": None}
-
-
-def _strip_code_fences(text: str) -> str:
-    t = (text or "").strip()
-    m = re.search(r"```(?:json)?\s*(\{.*?\}|\[.*?\])\s*```", t, flags=re.DOTALL | re.IGNORECASE)
-    if m:
-        return m.group(1).strip()
-    return t
-
+    # Increased max_output_tokens to 1500 for larger context analysis
+    payload = {"contents": contents, "generationConfig": {"temperature": temperature, "maxOutputTokens": max_output_tokens}}
+    if system_instruction: payload["systemInstruction"] = {"parts": [{"text": system_instruction}]}
+    r = requests.post(url, headers={"Content-Type": "application/json"}, json=payload, timeout=90)
+    if r.status_code != 200: return {"ok": False, "raw_text": r.text[:900], "error": f"Gemini HTTP {r.status_code}"}
+    return {"ok": True, "raw_text": _extract_gemini_text(r.json()), "error": None}
 
 def try_parse_json(text: str) -> Optional[Dict[str, Any]]:
     t = (text or "").strip()
-    # direct
-    try:
-        obj = json.loads(t)
-        return obj if isinstance(obj, dict) else None
-    except Exception:
-        pass
-
-    # strip fences
-    t2 = _strip_code_fences(t)
-    try:
-        obj = json.loads(t2)
-        return obj if isinstance(obj, dict) else None
-    except Exception:
-        pass
-
-    # extract first {...}
-    m = re.search(r"(\{.*\})", t2, flags=re.DOTALL)
+    try: return json.loads(t)
+    except: pass
+    m = re.search(r"```(?:json)?\s*(\{.*?\}|\[.*?\])\s*```", t, flags=re.DOTALL | re.IGNORECASE)
     if m:
-        try:
-            obj = json.loads(m.group(1))
-            return obj if isinstance(obj, dict) else None
-        except Exception:
-            return None
-
+        try: return json.loads(m.group(1).strip())
+        except: pass
     return None
 
+# =============================
+# Analytics & Plotting
+# =============================
+def render_visualizations(papers: List[Dict[str, Any]]):
+    if not papers: return
+    df = pd.DataFrame(papers)
+    
+    if 'year' in df.columns:
+        st.write("#### Result Insights")
+        c1, c2 = st.columns([2, 1])
+        with c1:
+            st.caption("Publication Trend (Yearly)")
+            year_counts = df['year'].dropna().astype(int).value_counts().sort_index()
+            st.bar_chart(year_counts, color="#3358BE")
+        with c2:
+            st.caption("Top Publication Venues")
+            venue_counts = df['venue'].replace('', 'Unknown').value_counts().head(5)
+            st.dataframe(venue_counts, use_container_width=True)
 
 # =============================
 # Context construction (RAG)
 # =============================
-def build_papers_context(
-    papers: List[Dict[str, Any]],
-    max_papers: int = 8,
-    include_abstract: bool = True,
-    abstract_char_limit: int = 650,
-) -> Tuple[str, List[str]]:
+def build_papers_context(papers, max_papers=None, include_abstract=True, abstract_char_limit=650):
     """
-    Returns (context_text, paper_labels)
-    paper_labels correspond to [P1], [P2], ...
+    If max_papers is None, uses all papers in the list.
     """
-    blocks = []
-    labels = []
-    chosen = papers[:max_papers]
-
+    chosen = papers if max_papers is None else papers[:max_papers]
+    blocks, labels = [], []
     for i, p in enumerate(chosen, start=1):
         label = f"P{i}"
         labels.append(label)
-
-        title = clean_ws(p.get("title", "No title"))
-        year = p.get("year", "")
-        venue = clean_ws(p.get("venue", ""))
-        authors = format_authors(p.get("authors", []))
-        cites = p.get("citationCount", 0)
-        url = p.get("url", "")
-        pdf = (p.get("openAccessPdf") or {}).get("url") or ""
-
-        abstract = clean_ws(p.get("abstract", "")) if include_abstract else ""
-        if include_abstract and len(abstract) > abstract_char_limit:
-            abstract = abstract[:abstract_char_limit] + "..."
-
-        blocks.append(
-            f"[{label}] {title}\n"
-            f"Year: {year} | Venue: {venue} | Citations: {cites}\n"
-            f"Authors: {authors}\n"
-            f"URL: {url}\n"
-            f"Open PDF: {pdf}\n"
-            + (f"Abstract: {abstract}\n" if include_abstract else "")
-        )
-
+        abstract = clean_ws(p.get("abstract", ""))[:abstract_char_limit] + "..." if include_abstract else ""
+        blocks.append(f"[{label}] {p.get('title')}\nYear: {p.get('year')} | Venue: {p.get('venue')}\nAuthors: {format_authors(p.get('authors'))}\nAbstract: {abstract}")
     return "\n---\n".join(blocks).strip(), labels
-
 
 def make_synthesis_prompt(query: str, context: str) -> str:
     return f"""
 User query: {query}
 
-You are given a list of papers with labels like [P1], [P2], etc.
+Analyze the provided papers and provide:
+1) 5–10 sentence synthesis (cite like [P1]).
+2) 8–12 research keywords.
+3) 3 refined search queries.
+4) Inconsistencies or Controversies: Identify conflicting findings, differing methodologies, or unresolved debates among these papers.
 
-Task:
-1) Write a 5–10 sentence synthesis of the themes across the papers (cite labels like [P3]).
-2) Extract 8–12 keywords/keyphrases (specific, research-useful).
-3) Suggest 3 refined search queries (more precise than the original).
-
-Return ONLY JSON with keys:
-- summary (string)
-- keywords (array of strings)
-- refined_queries (array of strings)
+Return ONLY JSON with keys: summary, keywords, refined_queries, controversies.
 
 PAPERS:
 {context}
 """.strip()
 
-
 # =============================
-# Session state
+# Session State initialization
 # =============================
-if "saved" not in st.session_state:
-    st.session_state.saved = []
-if "saved_ids" not in st.session_state:
-    st.session_state.saved_ids = set()
-
-if "last_query" not in st.session_state:
-    st.session_state.last_query = ""
-if "last_results" not in st.session_state:
-    st.session_state.last_results = []
-
-# Chat history
-if "chat_messages" not in st.session_state:
-    # Gemini expects roles: "user" and "model"
-    st.session_state.chat_messages = []  # list of {"role": "...", "text": "..."}
-if "chat_context_signature" not in st.session_state:
-    st.session_state.chat_context_signature = ""
-
+for key in ["saved", "saved_ids", "last_query", "last_results", "chat_messages", "chat_context_signature"]:
+    if key not in st.session_state:
+        st.session_state[key] = [] if any(x in key for x in ["messages", "saved", "results"]) else set() if "ids" in key else ""
 
 # =============================
 # SEARCH UI
 # =============================
 st.subheader("Search")
-
 with st.form("search_form", clear_on_submit=False):
     col1, col2, col3 = st.columns([6, 1.4, 1.4])
-    query = col1.text_input(
-        "Keyword query",
-        value=st.session_state.last_query,
-        placeholder="e.g., red teaming language models",
-    )
-    limit = col2.selectbox("Results", [5, 10, 20], index=1)
-    page = col3.number_input("Page", min_value=1, value=1, step=1)
-    show_raw = st.checkbox("Show raw Semantic Scholar response", value=False)
-    submitted = st.form_submit_button("Search", type="primary")
+    query = col1.text_input("Keyword query", value=st.session_state.last_query, placeholder="e.g., impact of AI on management")
+    limit = col2.selectbox("Results", [5, 10, 20, 30, 50], index=1)
+    page = col3.number_input("Page", min_value=1, value=1)
+    submitted = st.form_submit_button("Search")
 
 if submitted:
-    q = (query or "").strip()
-    if not q:
-        st.warning("Please enter a search query.")
+    if not query.strip(): st.warning("Please enter a query.")
     else:
-        offset = (int(page) - 1) * int(limit)
-        with st.spinner("Searching Semantic Scholar..."):
+        with st.spinner("Searching..."):
             try:
-                results = s2_search_papers(q, S2_KEY, limit=int(limit), offset=int(offset))
-            except Exception as e:
-                st.error(f"Search failed: {e}")
-                st.stop()
-
-        st.session_state.last_query = q
-        st.session_state.last_results = results.get("data", [])
-        total = results.get("total", 0)
-        st.caption(f"Found ~{total} results. Showing {len(st.session_state.last_results)} results (page {page}).")
-
-        if show_raw:
-            st.json(results)
-
+                results = s2_search_papers(query, S2_KEY, limit=int(limit), offset=(int(page)-1)*int(limit))
+                st.session_state.last_query = query
+                st.session_state.last_results = results.get("data", [])
+            except Exception as e: st.error(f"Error: {e}")
 
 # =============================
-# AI SYNTHESIS (JSON)
+# ANALYTICS SECTION
 # =============================
-st.subheader("AI synthesis (Gemini)")
+if st.session_state.last_results:
+    with st.expander("View Research Trends", expanded=True):
+        render_visualizations(st.session_state.last_results)
 
-ai_cols = st.columns([2.2, 2.2, 2.2, 3.4])
-target = ai_cols[0].selectbox("Summarize which set?", ["Current page results", "Saved papers"], index=0)
-model = ai_cols[1].text_input("Gemini model", value=DEFAULT_GEMINI_MODEL)
-max_p = ai_cols[2].selectbox("Use top-N papers", [5, 8, 10], index=1)
-show_ai_raw = ai_cols[3].checkbox("Show AI raw output", value=False)
+# =============================
+# AI SYNTHESIS (SYNCED TO RESULT COUNT)
+# =============================
+st.subheader("AI Insights")
+ai_cols = st.columns([3, 3, 4])
+target = ai_cols[0].selectbox("Source set", ["Current page results", "Saved papers"])
+model_ai = ai_cols[1].text_input("Gemini model", value=DEFAULT_GEMINI_MODEL)
+# Context size dropdown removed: now automatically synced to the Search "Results" count
 
-run_ai = st.button("AI: Summarize + Keywords", type="primary", disabled=not bool(GEMINI_KEY))
+run_ai = st.button("Generate Synthesis!", type="primary", disabled=not bool(GEMINI_KEY))
 
 if run_ai:
     papers = st.session_state.last_results if target == "Current page results" else st.session_state.saved
-    if not papers:
-        st.warning("No papers to summarize yet. Run a search (or save papers) first.")
+    if not papers: st.warning("No papers to summarize.")
     else:
-        ctx, _labels = build_papers_context(papers, max_papers=int(max_p), include_abstract=True)
+        # max_papers is now set to None, effectively using the full length of st.session_state.last_results
+        ctx, _ = build_papers_context(papers, max_papers=None)
         prompt = make_synthesis_prompt(st.session_state.last_query, ctx)
-
-        with st.spinner("Calling Gemini..."):
-            res = gemini_generate_text(
-                contents=[{"role": "user", "parts": [{"text": prompt}]}],
-                api_key=GEMINI_KEY,
-                model=model,
-                system_instruction="You output ONLY valid JSON. No code fences. No extra text.",
-                temperature=0.4,
-                max_output_tokens=900,
-            )
-
-        if not res["ok"]:
-            st.error(res["error"])
-            st.code(res.get("raw_text", ""), language="text")
-        else:
-            raw = res["raw_text"]
-            parsed = try_parse_json(raw)
-
-            if show_ai_raw:
-                st.markdown("### AI raw output")
-                st.code(raw, language="text")
-
-            if not parsed:
-                st.error("Gemini did not return valid JSON. Turn on 'Show AI raw output' to inspect.")
-            else:
-                st.success("AI synthesis generated.")
-                st.markdown("### Summary")
-                st.write(parsed.get("summary", ""))
-
-                st.markdown("### Keywords")
-                kws = parsed.get("keywords", [])
-                if isinstance(kws, list) and kws:
-                    st.write(", ".join([str(x) for x in kws]))
-                else:
-                    st.write(kws)
-
-                st.markdown("### Refined queries")
-                rq = parsed.get("refined_queries", [])
-                if isinstance(rq, list):
-                    for i, x in enumerate(rq, start=1):
-                        st.write(f"{i}. {x}")
-                else:
-                    st.write(rq)
-
-if not GEMINI_KEY:
-    st.info("To enable AI features, add `GEMINI_API_KEY` in `.streamlit/secrets.toml` or Streamlit Cloud Secrets.")
-
+        
+        with st.spinner(f"Gemini is synthesizing {len(papers)} papers..."):
+            res = gemini_generate_text([{"role": "user", "parts": [{"text": prompt}]}], GEMINI_KEY, model_ai, 
+                                      system_instruction="Output valid JSON only.")
+            if res["ok"]:
+                parsed = try_parse_json(res["raw_text"])
+                if parsed:
+                    st.info("### Synthesis\n" + parsed.get("summary", ""))
+                    
+                    st.markdown("### Controversies & Inconsistencies")
+                    st.warning(parsed.get("controversies", "No major inconsistencies identified in this subset."))
+                    
+                    st.write("**Keywords:** " + ", ".join(parsed.get("keywords", [])))
+                    st.write("**Refined Queries:**")
+                    for q in parsed.get("refined_queries", []): st.write(f"- {q}")
 
 # =============================
 # RESULTS LIST
 # =============================
 st.divider()
-st.subheader("Results")
-
-if not st.session_state.last_results:
-    st.info("Run a search above to see results here.")
-else:
+if st.session_state.last_results:
     for p in st.session_state.last_results:
         pid = paper_key(p)
-        kid = md5_key("res_" + pid)
-
-        title = p.get("title", "No title")
-        year = p.get("year", "")
-        venue = p.get("venue", "")
-        authors = format_authors(p.get("authors", []))
-        cites = p.get("citationCount", 0)
-        url = p.get("url", "")
-        abstract = p.get("abstract") or ""
-        pdf = (p.get("openAccessPdf") or {}).get("url")
-
-        with st.container(border=True):
-            top = st.columns([10, 1.6, 1.6])
-
-            top[0].markdown(f"### {title}")
-            top[0].write(f"**{authors}**")
-            top[0].write(f"{year} • {venue} • Citations: {cites}")
-
-            if url:
-                top[0].link_button("Open in Semantic Scholar", url)
-
-            save_disabled = pid in st.session_state.saved_ids
-            if top[1].button("Save", key=f"save_{kid}", disabled=save_disabled):
-                st.session_state.saved.append(p)
-                st.session_state.saved_ids.add(pid)
-                st.toast("Saved!", icon="✅")
-
-            if pdf:
-                top[2].link_button("Open PDF", pdf)
-            else:
-                top[2].button("No PDF", key=f"nopdf_{kid}", disabled=True)
-
-            with st.expander("Abstract"):
-                st.write(abstract if abstract else "No abstract available.")
-
+        with st.container():
+            c1, c2, c3 = st.columns([10, 1.5, 1.5])
+            c1.markdown(f"### {p.get('title')}")
+            c1.write(f"**{format_authors(p.get('authors'))}** | {p.get('year')} • {p.get('venue')}")
+            if c2.button("Save", key=f"s_{md5_key(pid)}", disabled=pid in st.session_state.saved_ids):
+                st.session_state.saved.append(p); st.session_state.saved_ids.add(pid); st.toast("Saved!")
+            if p.get("openAccessPdf"): c3.link_button("PDF", p["openAccessPdf"]["url"])
+            with st.expander("Show Abstract"): st.write(p.get("abstract") or "No abstract available.")
 
 # =============================
-# SAVED LIST
+# CHAT INTERFACE
 # =============================
 st.divider()
-st.subheader("Saved papers")
-
-if not st.session_state.saved:
-    st.info("No saved papers yet. Search above and click **Save** on papers you like.")
-else:
-    for i, p in enumerate(st.session_state.saved, start=1):
-        pid = paper_key(p)
-        kid = md5_key("saved_" + pid)
-
-        title = p.get("title", "No title")
-        year = p.get("year", "")
-        authors = format_authors(p.get("authors", []))
-        url = p.get("url", "")
-
-        with st.container(border=True):
-            cols = st.columns([10, 1.5])
-            cols[0].markdown(f"**{i}. {title}**")
-            cols[0].write(f"{authors} • {year}")
-            if url:
-                cols[0].link_button("Open", url)
-
-            if cols[1].button("Remove", key=f"rm_{kid}"):
-                st.session_state.saved = [x for x in st.session_state.saved if paper_key(x) != pid]
-                st.session_state.saved_ids.discard(pid)
-                st.rerun()
-
-    if st.button("Clear all saved"):
-        st.session_state.saved = []
-        st.session_state.saved_ids = set()
-        st.rerun()
-
-
-# =============================
-# CHAT WITH RESULTS (Scholar-lab style)
-# =============================
-st.divider()
-st.subheader("Chat with your search results (Gemini)")
-
-chat_cols = st.columns([2.4, 2.4, 2.0, 3.2])
-chat_target = chat_cols[0].selectbox("Chat over", ["Current page results", "Saved papers"], index=0)
-chat_model = chat_cols[1].text_input("Gemini model (chat)", value=DEFAULT_GEMINI_MODEL)
-chat_topn = chat_cols[2].selectbox("Context papers (top N)", [5, 8, 10], index=1)
-chat_include_abs = chat_cols[3].checkbox("Include abstracts in context", value=True)
-
-# Build context + signature (so if context changes, we can warn/clear)
-papers_for_chat = st.session_state.last_results if chat_target == "Current page results" else st.session_state.saved
-context_text, labels = build_papers_context(
-    papers_for_chat,
-    max_papers=int(chat_topn),
-    include_abstract=bool(chat_include_abs),
-)
-
-context_signature = md5_key(chat_target + str(chat_topn) + str(chat_include_abs) + str(len(papers_for_chat)) + (st.session_state.last_query or ""))
-if st.session_state.chat_context_signature and st.session_state.chat_context_signature != context_signature:
-    st.warning("Your chat context changed (different papers/settings). Consider clearing chat for consistency.")
-
-btn_cols = st.columns([1.2, 1.2, 7.6])
-clear_chat = btn_cols[0].button("Clear chat", disabled=False)
-show_context = btn_cols[1].button("Show context", disabled=(not bool(context_text)))
-if show_context:
-    st.code(context_text or "(no context yet)", language="text")
-
-if clear_chat:
-    st.session_state.chat_messages = []
-    st.session_state.chat_context_signature = context_signature
-    st.rerun()
-
-# If no papers, chat won't be useful
-if not papers_for_chat:
-    st.info("Chat needs papers. Run a search first (or save papers), then come back here.")
-else:
-    # render history
-    for m in st.session_state.chat_messages:
-        role = "assistant" if m["role"] == "model" else "user"
-        with st.chat_message(role):
-            st.write(m["text"])
-
-    user_q = st.chat_input("Ask a question about these results…", disabled=not bool(GEMINI_KEY))
-
-    if user_q:
-        # Update signature at first message
-        if not st.session_state.chat_context_signature:
-            st.session_state.chat_context_signature = context_signature
-
-        # add user message
-        st.session_state.chat_messages.append({"role": "user", "text": user_q})
-        with st.chat_message("user"):
-            st.write(user_q)
-
-        # Build Gemini contents from recent history (keep it short)
-        # Gemini supports multi-turn with roles user/model
-        recent = st.session_state.chat_messages[-10:]
-        contents = []
-        for msg in recent:
-            contents.append({"role": msg["role"], "parts": [{"text": msg["text"]}]})
-
-        # System instruction: force grounding + citations
-        system_instruction = (
-            "You are an academic literature assistant. "
-            "You MUST ground answers only in the provided paper context. "
-            "When you make a claim, cite the relevant papers using labels like [P1], [P2]. "
-            "If the answer is not supported by the context, say you don't know and suggest a follow-up search query. "
-            "Keep answers concise and actionable."
-        )
-
-        # We inject context as a prefix each time (simple & reliable)
-        context_prefix = (
-            f"CONTEXT PAPERS:\n{context_text}\n\n"
-            "Remember: cite with [P#] labels.\n"
-        )
-
-        # Replace the last user message text with context+question (so model sees context)
-        # (Do not mutate the stored chat history; just modify payload)
-        contents_for_call = contents[:-1] + [
-            {"role": "user", "parts": [{"text": context_prefix + "\nUSER QUESTION:\n" + user_q}]}
-        ]
-
+st.subheader("Chat with Results?")
+if st.session_state.last_results or st.session_state.saved:
+    for msg in st.session_state.chat_messages:
+        with st.chat_message("assistant" if msg["role"] == "model" else "user"): st.write(msg["text"])
+    
+    user_input = st.chat_input("Ask a question about these results...")
+    if user_input:
+        st.session_state.chat_messages.append({"role": "user", "text": user_input})
+        with st.chat_message("user"): st.write(user_input)
+        
+        # Also sync chat context to the full visible list
+        papers_chat = st.session_state.last_results if target == "Current page results" else st.session_state.saved
+        ctx_chat, _ = build_papers_context(papers_chat, max_papers=None)
+        
+        full_prompt = f"CONTEXT:\n{ctx_chat}\n\nQUESTION: {user_input}"
         with st.chat_message("assistant"):
-            with st.spinner("Gemini is thinking…"):
-                res = gemini_generate_text(
-                    contents=contents_for_call,
-                    api_key=GEMINI_KEY,
-                    model=chat_model,
-                    system_instruction=system_instruction,
-                    temperature=0.3,
-                    max_output_tokens=900,
-                )
-
-            if not res["ok"]:
-                st.error(res["error"])
-                st.code(res.get("raw_text", ""), language="text")
-            else:
-                answer = res["raw_text"].strip()
-                st.write(answer)
-                st.session_state.chat_messages.append({"role": "model", "text": answer})
-
-    if not GEMINI_KEY:
-        st.info("Add `GEMINI_API_KEY` to enable chat.")
+            with st.spinner("Thinking..."):
+                res = gemini_generate_text([{"role": "user", "parts": [{"text": full_prompt}]}], GEMINI_KEY, model_ai,
+                                          system_instruction="Academic assistant. Use [P1] citations. Concise.")
+                if res["ok"]:
+                    st.write(res["raw_text"])
+                    st.session_state.chat_messages.append({"role": "model", "text": res["raw_text"]})
